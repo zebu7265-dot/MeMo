@@ -15,7 +15,7 @@ public:
     explicit HotCache(size_t max_size = 1024) : max_size_(max_size) {}
 
     // Return object if present in cache, nullptr otherwise.
-    MemoryObjectPtr get(const UUID& id) {
+    MemoryObjectPtr get(const UUID& id) const {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         auto it = cache_.find(id);
         if (it == cache_.end()) return nullptr;
