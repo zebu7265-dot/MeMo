@@ -7,6 +7,7 @@
 #include <iostream>
 #include <thread>
 #include <optional>
+#include <atomic>
 
 using namespace om;
 
