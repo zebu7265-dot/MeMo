@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 
 namespace om {
 
