@@ -89,19 +89,19 @@ private:
 
     InternalResult execute_internal(const UUID& procedure_id, const std::vector<UUID>& inputs, Transaction& tx, int depth) {
         if (depth > MAX_DEPTH) {
-            return {ExecutionStatus::Failure, "Max recursion depth exceeded", {}, Duration::zero()};
+            return {ExecutionStatus::Failure, "Max recursion depth exceeded", {}, Duration{}};
         }
         // read procedure
         auto proc_obj = tx.read(procedure_id);
         if (!proc_obj) {
-            return {ExecutionStatus::Failure, "Procedure not found", {}, Duration::zero()};
+            return {ExecutionStatus::Failure, "Procedure not found", {}, Duration{}};
         }
         auto proc = std::dynamic_pointer_cast<const Procedure>(proc_obj);
         if (!proc) {
-            return {ExecutionStatus::Failure, "Object is not a procedure", {}, Duration::zero()};
+            return {ExecutionStatus::Failure, "Object is not a procedure", {}, Duration{}};
         }
         if (proc->state != ProcedureState::Active) {
-            return {ExecutionStatus::Failure, "Procedure not active", {}, Duration::zero()};
+            return {ExecutionStatus::Failure, "Procedure not active", {}, Duration{}};
         }
 
         auto start = std::chrono::system_clock::now();
@@ -114,13 +114,13 @@ private:
                 } else if constexpr (std::is_same_v<T, CompositeBody>) {
                     result = run_composite(body, inputs, tx, depth);
                 } else if constexpr (std::is_same_v<T, OpaqueRecipe>) {
-                    result = {ExecutionStatus::Failure, "OpaqueRecipe cannot be executed", {}, Duration::zero()};
+                    result = {ExecutionStatus::Failure, "OpaqueRecipe cannot be executed", {}, Duration{}};
                 } else {
-                    result = {ExecutionStatus::Failure, "Unknown body type", {}, Duration::zero()};
+                    result = {ExecutionStatus::Failure, "Unknown body type", {}, Duration{}};
                 }
             }, proc->body);
         } catch (const std::exception& e) {
-            result = {ExecutionStatus::Failure, std::string("Exception during execute_internal: ") + e.what(), {}, Duration::zero()};
+            result = {ExecutionStatus::Failure, std::string("Exception during execute_internal: ") + e.what(), {}, Duration{}};
         }
         auto end = std::chrono::system_clock::now();
         result.duration = end - start;
@@ -131,7 +131,7 @@ private:
         std::shared_lock<std::shared_mutex> lock(reg_mutex_);
         auto it = registry_.find(body.function_name);
         if (it == registry_.end()) {
-            return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration::zero()};
+            return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration{}};
         }
         try {
             auto start = std::chrono::system_clock::now();
@@ -139,7 +139,7 @@ private:
             auto end = std::chrono::system_clock::now();
             return {ExecutionStatus::Success, "", outputs, end - start};
         } catch (const std::exception& e) {
-            return {ExecutionStatus::Failure, std::string("Exception in native function: ") + e.what(), {}, Duration::zero()};
+            return {ExecutionStatus::Failure, std::string("Exception in native function: ") + e.what(), {}, Duration{}};
         }
     }
 
@@ -155,7 +155,7 @@ private:
             current_inputs = res.outputs;
             accumulated_outputs.insert(accumulated_outputs.end(), res.outputs.begin(), res.outputs.end());
         }
-        return {ExecutionStatus::Success, "", accumulated_outputs, Duration::zero()};
+        return {ExecutionStatus::Success, "", accumulated_outputs, Duration{}};
     }
 
     static UUID generate_uuid() {
