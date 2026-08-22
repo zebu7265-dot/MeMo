@@ -15,6 +15,12 @@ public:
     // Persist an object to disk (JSON). Returns true on success.
     bool save(const UUID& id, const MemoryObject& obj);
 
+    // Write serialized wrapper to a temp file (phase 1 of two-phase commit)
+    bool write_temp(const UUID& id, const std::string& wrapper_json);
+
+    // Promote temp file to final (phase 2 of commit). Returns true on success.
+    bool promote_temp(const UUID& id);
+
     // Load object from disk. Returns nullptr if not found or on error.
     MemoryObjectPtr load(const UUID& id);
 
@@ -35,6 +41,7 @@ public:
 
 private:
     std::string make_filename(const UUID& id) const;
+    std::string make_tmp_filename(const UUID& id) const;
     void persist_index_nolock();
 
     std::string base_path_;
