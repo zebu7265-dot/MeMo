@@ -7,6 +7,7 @@
 #include <optional>
 #include <unordered_map>
 #include <functional>
+#include "third_party/nlohmann-json/include_nlohmann_json.hpp"
 
 namespace om {
 
@@ -61,6 +62,39 @@ struct Procedure : public MemoryObject {
         }
         return true;
     }
+
+    std::string serialize() const override {
+        using nlohmann::json;
+        json j;
+        j["id"] = id;
+        j["owner"] = owner;
+        j["recorded_at"] = std::chrono::duration_cast<std::chrono::milliseconds>(recorded_at.time_since_epoch()).count();
+        j["type"] = static_cast<int>(type());
+        j["name"] = name;
+        j["description"] = description;
+        json jc = json::object();
+        jc["input_schema"] = json::object();
+        for (const auto& kv : contract.input_schema) jc["input_schema"][kv.first] = kv.second;
+        jc["output_schema"] = json::object();
+        for (const auto& kv : contract.output_schema) jc["output_schema"][kv.first] = kv.second;
+        jc["preconditions"] = json::array();
+        for (const auto& p : contract.preconditions) jc["preconditions"].push_back(p);
+        j["contract"] = jc;
+        j["state"] = static_cast<int>(state);
+        if (superseded_by) j["superseded_by"] = *superseded_by; else j["superseded_by"] = nullptr;
+        json jb = json::object();
+        if (std::holds_alternative<NativeBody>(body)) {
+            jb["function_name"] = std::get<NativeBody>(body).function_name;
+        } else if (std::holds_alternative<CompositeBody>(body)) {
+            jb["steps"] = json::array();
+            for (const auto& s : std::get<CompositeBody>(body).steps) jb["steps"].push_back(s);
+        } else if (std::holds_alternative<OpaqueRecipe>(body)) {
+            jb["mime_type"] = std::get<OpaqueRecipe>(body).mime_type;
+            jb["content"] = std::get<OpaqueRecipe>(body).content;
+        }
+        j["body"] = jb;
+        return j.dump();
+    }
 };
 
 struct Execution : public MemoryObject {
@@ -90,6 +124,24 @@ struct Execution : public MemoryObject {
             return !error_log.empty();
         }
         return true;
+    }
+
+    std::string serialize() const override {
+        using nlohmann::json;
+        json j;
+        j["id"] = id;
+        j["owner"] = owner;
+        j["recorded_at"] = std::chrono::duration_cast<std::chrono::milliseconds>(recorded_at.time_since_epoch()).count();
+        j["type"] = static_cast<int>(type());
+        j["procedure_id"] = procedure_id;
+        j["input_facts"] = json::array();
+        for (const auto& f : input_facts) j["input_facts"].push_back(f);
+        j["output_facts"] = json::array();
+        for (const auto& f : output_facts) j["output_facts"].push_back(f);
+        j["status"] = static_cast<int>(status);
+        j["error_log"] = error_log;
+        j["elapsed_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed_time).count();
+        return j.dump();
     }
 };
 
