@@ -8,8 +8,14 @@
 #include <vector>
 #include <optional>
 #include <functional>
+#include <atomic>
 
 namespace om {
+
+struct StoredObject {
+    std::shared_ptr<const MemoryObject> obj;
+    uint64_t version;
+};
 
 class Transaction; // forward
 
@@ -34,8 +40,10 @@ private:
     friend class Transaction;
 
     mutable std::shared_mutex mutex_;
-    std::unordered_map<UUID, std::shared_ptr<const MemoryObject>> objects_;
+    // Map from id -> StoredObject (object pointer + version)
+    std::unordered_map<UUID, StoredObject> objects_;
     std::unordered_map<AgentID, std::vector<UUID>> owner_index_;
+    std::atomic<uint64_t> global_version_counter_{1};
 
     void reindex_object(const std::shared_ptr<const MemoryObject>& obj);
 
