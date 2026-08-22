@@ -1,0 +1,1 @@
+{"name":"nlohmann-json","version":"3.11.2","description":"nlohmann/json single-header for C++ JSON handling","files":["single_include/nlohmann/json.hpp"]}
