@@ -5,6 +5,7 @@
 #include <shared_mutex>
 #include <chrono>
 #include <type_traits>
+#include <unordered_set>
 
 namespace om {
 
@@ -57,6 +58,17 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
         if (predicate && fact->predicate != *predicate) continue;
         if (owner && fact->owner != *owner) continue;
         out.push_back(fact);
+    }
+    lock.unlock();
+
+    // A restarted graph has no in-memory entries yet; include persisted Cold objects.
+    for (const auto& id : cold_.list_all_ids()) {
+        if (auto fact = std::dynamic_pointer_cast<const Fact>(cold_.load(id))) {
+            if (entity && fact->entity != *entity) continue;
+            if (predicate && fact->predicate != *predicate) continue;
+            if (owner && fact->owner != *owner) continue;
+            out.push_back(fact);
+        }
     }
     return out;
 }
