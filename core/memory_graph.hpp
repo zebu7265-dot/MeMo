@@ -56,8 +56,8 @@ private:
     }
 
     // Storage layers
-    HotCache hot_;
-    ColdStorage cold_;
+    mutable HotCache hot_;
+    mutable ColdStorage cold_;
 };
 
 } // namespace om
