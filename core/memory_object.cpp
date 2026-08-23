@@ -1,5 +1,3 @@
-#pragma once
-
 #include "third_party/nlohmann-json/include_nlohmann_json.hpp"
 #include "core/memory_object.hpp"
 #include "core/declarative.hpp"
@@ -19,15 +17,15 @@ static Value json_to_value(const json& j) {
     if (j.is_number_float()) return j.get<double>();
     if (j.is_string()) return j.get<std::string>();
     if (j.is_array()) {
-        std::vector<Value> arr;
+        std::vector<std::string> arr;
         arr.reserve(j.size());
-        for (const auto& e : j) arr.push_back(json_to_value(e));
+        for (const auto& e : j) arr.push_back(e.dump());
         return arr;
     }
     if (j.is_object()) {
-        std::unordered_map<std::string, Value> m;
+        std::unordered_map<std::string, std::string> m;
         for (auto it = j.begin(); it != j.end(); ++it) {
-            m[it.key()] = json_to_value(it.value());
+            m[it.key()] = it.value().dump();
         }
         return m;
     }
@@ -161,3 +159,5 @@ std::shared_ptr<const MemoryObject> MemoryObject::deserialize(const std::string&
     }
     return nullptr;
 }
+
+} // namespace om
