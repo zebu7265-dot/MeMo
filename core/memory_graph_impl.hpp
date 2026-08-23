@@ -49,13 +49,9 @@ inline Transaction MemoryGraph::begin_transaction() {
     return Transaction(*this);
 }
 
-// Provide an overload so callers (both StoredObject and shared_ptr-based paths) can reindex
 inline void MemoryGraph::reindex_object(const std::shared_ptr<const MemoryObject>& obj) {
     if (!obj) return;
     owner_index_[obj->owner].push_back(obj->id);
-}
-inline void MemoryGraph::reindex_object(const StoredObject& so) {
-    reindex_object(so.obj);
 }
 
 inline bool MemoryGraph::validate_global_invariants() const {
@@ -187,7 +183,7 @@ inline bool Transaction::commit() {
             graph_.global_version_counter_.fetch_add(1, std::memory_order_relaxed);
         StoredObject so{kv.second, version};
         graph_.objects_.emplace(kv.first, so);
-        graph_.reindex_object(so);
+        graph_.reindex_object(so.obj);
     }
 
     committed_ = true;
