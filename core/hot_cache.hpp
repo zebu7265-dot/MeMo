@@ -5,6 +5,7 @@
 #include <shared_mutex>
 #include <functional>
 #include <vector>
+#include <mutex>
 
 namespace om {
 
@@ -108,9 +109,9 @@ public:
 
 private:
     mutable std::shared_mutex mutex_;
-    std::unordered_map<UUID, MemoryObjectPtr> cache_;
-    std::list<UUID> lru_list_; // front = most recent
-    std::unordered_map<UUID, std::list<UUID>::iterator> lru_iterators_;
+    mutable std::unordered_map<UUID, MemoryObjectPtr> cache_;
+    mutable std::list<UUID> lru_list_; // front = most recent
+    mutable std::unordered_map<UUID, std::list<UUID>::iterator> lru_iterators_;
     size_t max_size_{1024};
 };
 
