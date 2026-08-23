@@ -13,7 +13,8 @@ inline std::shared_ptr<const MemoryObject> MemoryGraph::get_object(const UUID& i
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = objects_.find(id);
     if (it == objects_.end()) return nullptr;
-    return it->second;
+    // objects_ stores StoredObject; return the contained pointer
+    return it->second.obj;
 }
 
 inline std::shared_ptr<const Fact> MemoryGraph::get_fact(const UUID& id) const {
@@ -33,7 +34,8 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
     std::vector<std::shared_ptr<const Fact>> out;
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& kv : objects_) {
-        auto fact = std::dynamic_pointer_cast<const Fact>(kv.second);
+        // kv.second is StoredObject; inspect the inner shared_ptr
+        auto fact = std::dynamic_pointer_cast<const Fact>(kv.second.obj);
         if (!fact) continue;
         if (entity && fact->entity != *entity) continue;
         if (predicate && fact->predicate != *predicate) continue;
@@ -47,16 +49,21 @@ inline Transaction MemoryGraph::begin_transaction() {
     return Transaction(*this);
 }
 
+// Provide an overload so callers (both StoredObject and shared_ptr-based paths) can reindex
 inline void MemoryGraph::reindex_object(const std::shared_ptr<const MemoryObject>& obj) {
     if (!obj) return;
     owner_index_[obj->owner].push_back(obj->id);
+}
+inline void MemoryGraph::reindex_object(const StoredObject& so) {
+    reindex_object(so.obj);
 }
 
 inline bool MemoryGraph::validate_global_invariants() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& kv : objects_) {
-        const auto& obj = kv.second;
-        if (!obj->is_valid()) return false;
+        const auto& objptr = kv.second.obj;
+        if (!objptr) return false;
+        if (!objptr->is_valid()) return false;
         // Additional referential checks could be added here similar to Transaction::validate_references_nolock
     }
     return true;
@@ -90,8 +97,9 @@ inline std::shared_ptr<const MemoryObject> Transaction::read(const UUID& id) {
         if (it == graph_.objects_.end()) {
             return nullptr;
         }
-        read_set_.emplace(id, it->second);
-        return it->second;
+        // store the inner shared_ptr in the read_set
+        read_set_.emplace(id, it->second.obj);
+        return it->second.obj;
     }
 }
 
@@ -160,8 +168,8 @@ inline bool Transaction::commit() {
             failed_ = true;
             return false;
         }
-        // pointer equality indicates unchanged
-        if (it->second != kv.second) {
+        // pointer equality used previously; compare the stored pointer in graph to the pointer we observed
+        if (it->second.obj != kv.second) {
             failed_ = true;
             return false;
         }
@@ -173,10 +181,13 @@ inline bool Transaction::commit() {
         return false;
     }
 
-    // 4) Apply atomically
+    // 4) Apply atomically; create StoredObject entries with explicit versions
     for (const auto& kv : write_set_) {
-        graph_.objects_.emplace(kv.first, kv.second);
-        graph_.reindex_object(kv.second);
+        const uint64_t version =
+            graph_.global_version_counter_.fetch_add(1, std::memory_order_relaxed);
+        StoredObject so{kv.second, version};
+        graph_.objects_.emplace(kv.first, so);
+        graph_.reindex_object(so);
     }
 
     committed_ = true;
