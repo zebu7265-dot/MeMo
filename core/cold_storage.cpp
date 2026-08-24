@@ -128,14 +128,13 @@ bool ColdStorage::save(const UUID& id, const MemoryObject& obj) {
 }
 
 MemoryObjectPtr ColdStorage::load(const UUID& id) {
-    std::string fname;
-    {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        auto it = file_map_.find(id);
-        if (it == file_map_.end()) return nullptr;
-        fname = it->second;
+    std::string path;
+    try {
+        path = make_filename(id);
+    } catch (...) {
+        return nullptr;
     }
-    std::string path = (fs::path(base_path_) / fname).string();
+    if (!fs::exists(path)) return nullptr;
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) return nullptr;
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -149,6 +148,10 @@ MemoryObjectPtr ColdStorage::load(const UUID& id) {
                 obj->last_accessed = std::chrono::system_clock::time_point(
                     std::chrono::milliseconds(wrapper["last_accessed"].get<int64_t>()));
             }
+        }
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            file_map_[id] = fs::path(path).filename().string();
         }
         return obj;
     } catch (...) {
