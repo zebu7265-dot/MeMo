@@ -119,11 +119,13 @@ int main() {
     // Hot cache LRU behavior
     HotCache cache(1);
     bool evicted = false;
-    cache.put(f, [&](MemoryObjectPtr object) {
+    cache.put(f, [&](MemoryObjectPtr object) -> bool {
         evicted = object && object->id == id1;
+        return true;
     });
-    cache.put(ev, [&](MemoryObjectPtr object) {
+    cache.put(ev, [&](MemoryObjectPtr object) -> bool {
         evicted = object && object->id == id1;
+        return true;
     });
     assert(evicted);
     assert(cache.size() == 1);
