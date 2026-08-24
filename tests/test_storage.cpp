@@ -1,9 +1,13 @@
 #include "core/declarative.hpp"
 #include "core/procedural.hpp"
 #include "core/memory_object.hpp"
+#include "core/cold_storage.hpp"
+#include "core/hot_cache.hpp"
 #include "third_party/nlohmann-json/include_nlohmann_json.hpp"
 #include <cassert>
+#include <filesystem>
 #include <iostream>
+#include <thread>
 
 using namespace om;
 using nlohmann::json;
@@ -94,6 +98,35 @@ int main() {
     assert(rex != nullptr);
     assert(rex->procedure_id == pid);
     assert(rex->input_facts.size() == 1 && rex->input_facts[0] == id1);
+
+    // Cold storage round trip and index rebuild
+    const auto cold_path = std::filesystem::temp_directory_path() / "memo-storage-test";
+    std::filesystem::remove_all(cold_path);
+    {
+        ColdStorage cold(cold_path.string());
+        assert(cold.save(id1, *f));
+        assert(cold.list_all_ids().size() == 1);
+        auto loaded = cold.load(id1);
+        assert(loaded != nullptr);
+        auto loaded_fact = std::dynamic_pointer_cast<const Fact>(loaded);
+        assert(loaded_fact && loaded_fact->entity == "entity1");
+        assert(cold.total_size() > 0);
+        assert(cold.remove(id1));
+        assert(cold.list_all_ids().empty());
+    }
+    std::filesystem::remove_all(cold_path);
+
+    // Hot cache LRU behavior
+    HotCache cache(1);
+    bool evicted = false;
+    cache.put(f, [&](MemoryObjectPtr object) {
+        evicted = object && object->id == id1;
+    });
+    cache.put(ev, [&](MemoryObjectPtr object) {
+        evicted = object && object->id == id1;
+    });
+    assert(evicted);
+    assert(cache.size() == 1);
 
     std::cout << "All tests passed\n";
     return 0;
