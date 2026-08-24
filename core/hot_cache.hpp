@@ -11,7 +11,7 @@ namespace om {
 
 class HotCache {
 public:
-    using EvictCallback = std::function<void(MemoryObjectPtr)>;
+    using EvictCallback = std::function<bool(MemoryObjectPtr)>;
 
     explicit HotCache(size_t max_size = 1024) : max_size_(max_size) {}
 
@@ -77,10 +77,15 @@ public:
         // call callbacks outside lock
         if (on_evicted) {
             for (auto& e : evicted) {
-                try {
-                    on_evicted(e);
-                } catch (...) {
-                    // swallow exceptions from callback to avoid unexpected crashes in cache
+                bool persisted = false;
+                try { persisted = on_evicted(e); } catch (...) {}
+                if (!persisted) {
+                    // Do not silently lose data. Keep failed evictions available
+                    // until the caller can persist them successfully.
+                    std::unique_lock<std::shared_mutex> lock(mutex_);
+                    cache_[e->id] = e;
+                    lru_list_.push_front(e->id);
+                    lru_iterators_[e->id] = lru_list_.begin();
                 }
             }
         }
