@@ -48,8 +48,12 @@ public:
 
 private:
     MemoryGraph& graph_;
-    std::unordered_map<UUID, std::shared_ptr<const MemoryObject>> read_set_;
+    // read_set_ stores the observed object pointer and the version observed at read time
+    std::unordered_map<UUID, std::pair<std::shared_ptr<const MemoryObject>, uint64_t>> read_set_;
+    // write_set_ stores staged object pointers
     std::unordered_map<UUID, std::shared_ptr<const MemoryObject>> write_set_;
+    // snapshot version captured at transaction start (repeatable-read MVCC)
+    uint64_t snapshot_version_{0};
     bool committed_{false};
     bool failed_{false};
 

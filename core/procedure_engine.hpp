@@ -9,6 +9,9 @@
 #include <atomic>
 #include <stdexcept>
 #include <iostream>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 namespace om {
 
@@ -31,6 +34,8 @@ public:
     };
 
     Execution execute(const UUID& procedure_id, const std::vector<UUID>& inputs) {
+        // Use a dedicated transaction for the procedure execution (savepoint-style). This transaction
+        // is committed on success and rolled back on failure, so the caller cannot observe partial changes.
         Transaction tx = graph_.begin_transaction();
         auto res = execute_internal(procedure_id, inputs, tx, 0);
 
@@ -39,44 +44,34 @@ public:
         Timestamp now = std::chrono::system_clock::now();
         Execution exec(exec_id, "engine", now, procedure_id, inputs, res.outputs, res.status, res.error, res.duration);
 
-        // If success, try to stage and commit in main tx
-        if (res.status == ExecutionStatus::Success) {
-            try {
-                tx.stage_existing(std::make_shared<const Execution>(exec));
-                bool ok = tx.commit();
-                if (ok) {
-                    return exec;
-                } else {
-                    // commit conflict - convert exec to failure for audit, then fallback write
-                    Execution exec_conflict(exec.id, exec.owner, exec.recorded_at, exec.procedure_id, {}, {}, ExecutionStatus::Failure,
-                                            "Commit conflict: changes were not applied", exec.elapsed_time);
-                    // fallback transaction
-                    Transaction fallback = graph_.begin_transaction();
-                    fallback.stage_existing(std::make_shared<const Execution>(exec_conflict));
-                    if (!fallback.commit()) {
-                        throw std::runtime_error("Failed to write execution log in fallback transaction");
-                    }
-                    return exec_conflict;
-                }
-            } catch (const std::exception& e) {
-                // Any exception while staging/committing should lead to fallback log
-                Execution exec_err(exec.id, exec.owner, exec.recorded_at, exec.procedure_id, {}, {}, ExecutionStatus::Failure,
-                                   std::string("Exception during commit: ") + e.what(), exec.elapsed_time);
+        // Attempt to stage and commit the execution log into the same transaction used for execution
+        try {
+            tx.stage_existing(std::make_shared<const Execution>(exec));
+            bool ok = tx.commit();
+            if (ok) {
+                return exec;
+            } else {
+                // commit conflict - convert exec to failure for audit, then fallback write
+                Execution exec_conflict(exec.id, exec.owner, exec.recorded_at, exec.procedure_id, {}, {}, ExecutionStatus::Failure,
+                                        "Commit conflict: changes were not applied", exec.elapsed_time);
+                // fallback transaction
                 Transaction fallback = graph_.begin_transaction();
-                fallback.stage_existing(std::make_shared<const Execution>(exec_err));
+                fallback.stage_existing(std::make_shared<const Execution>(exec_conflict));
                 if (!fallback.commit()) {
-                    throw std::runtime_error("Failed to write execution log in fallback transaction after exception");
+                    throw std::runtime_error("Failed to write execution log in fallback transaction");
                 }
-                return exec_err;
+                return exec_conflict;
             }
-        } else {
-            // Not success: still must write audit log (fallback or same tx)
+        } catch (const std::exception& e) {
+            // Any exception while staging/committing should lead to fallback log
+            Execution exec_err(exec.id, exec.owner, exec.recorded_at, exec.procedure_id, {}, {}, ExecutionStatus::Failure,
+                               std::string("Exception during commit: ") + e.what(), exec.elapsed_time);
             Transaction fallback = graph_.begin_transaction();
-            fallback.stage_existing(std::make_shared<const Execution>(exec));
+            fallback.stage_existing(std::make_shared<const Execution>(exec_err));
             if (!fallback.commit()) {
-                throw std::runtime_error("Failed to write execution log for failed execution");
+                throw std::runtime_error("Failed to write execution log in fallback transaction after exception");
             }
-            return exec;
+            return exec_err;
         }
     }
 
@@ -128,14 +123,18 @@ private:
     }
 
     InternalResult run_native(const NativeBody& body, const std::vector<UUID>& inputs, Transaction& tx) {
-        std::shared_lock<std::shared_mutex> lock(reg_mutex_);
-        auto it = registry_.find(body.function_name);
-        if (it == registry_.end()) {
-            return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration{}};
+        NativeFunction fn;
+        {
+            std::shared_lock<std::shared_mutex> lock(reg_mutex_);
+            auto it = registry_.find(body.function_name);
+            if (it == registry_.end()) {
+                return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration{}};
+            }
+            fn = it->second; // copy the callable
         }
         try {
             auto start = std::chrono::system_clock::now();
-            auto outputs = it->second(inputs, graph_, tx);
+            auto outputs = fn(inputs, graph_, tx);
             auto end = std::chrono::system_clock::now();
             return {ExecutionStatus::Success, "", outputs, end - start};
         } catch (const std::exception& e) {
@@ -159,8 +158,26 @@ private:
     }
 
     static UUID generate_uuid() {
-        static std::atomic<uint64_t> counter{1};
-        return "uuid-" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+        // UUID v4 generator (RFC 4122 compliant) using random_device
+        std::random_device rd;
+        std::mt19937_64 gen(rd());
+        std::uniform_int_distribution<uint64_t> dist(0, std::numeric_limits<uint64_t>::max());
+        uint64_t a = dist(gen);
+        uint64_t b = dist(gen);
+        unsigned char bytes[16];
+        for (int i = 0; i < 8; ++i) bytes[i] = (a >> (8 * (7 - i))) & 0xFF;
+        for (int i = 0; i < 8; ++i) bytes[8 + i] = (b >> (8 * (7 - i))) & 0xFF;
+        // set version to 4
+        bytes[6] = (bytes[6] & 0x0F) | 0x40;
+        // set variant to RFC 4122
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        std::ostringstream ss;
+        ss << std::hex << std::setfill('0');
+        for (int i = 0; i < 16; ++i) {
+            ss << std::setw(2) << static_cast<int>(bytes[i]);
+            if (i == 3 || i == 5 || i == 7 || i == 9) ss << '-';
+        }
+        return ss.str();
     }
 };
 

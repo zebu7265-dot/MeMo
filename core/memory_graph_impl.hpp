@@ -69,7 +69,10 @@ inline bool MemoryGraph::validate_global_invariants() const {
 
 inline Transaction::Transaction(MemoryGraph& graph)
     : graph_(graph)
-{}
+{
+    // Capture a repeatable-read snapshot version at transaction start
+    snapshot_version_ = graph_.global_version_counter_.load(std::memory_order_acquire);
+}
 
 inline Transaction::~Transaction() {
     if (!committed_ && !failed_) {
@@ -84,7 +87,7 @@ inline std::shared_ptr<const MemoryObject> Transaction::read(const UUID& id) {
 
     // Then check read_set
     auto rit = read_set_.find(id);
-    if (rit != read_set_.end()) return rit->second;
+    if (rit != read_set_.end()) return rit->second.first;
 
     // Lazy snapshot: read from graph under shared lock
     {
@@ -93,8 +96,12 @@ inline std::shared_ptr<const MemoryObject> Transaction::read(const UUID& id) {
         if (it == graph_.objects_.end()) {
             return nullptr;
         }
-        // store the inner shared_ptr in the read_set
-        read_set_.emplace(id, it->second.obj);
+        // Only return the object if its version is visible to our snapshot
+        if (it->second.version > snapshot_version_) {
+            return nullptr;
+        }
+        // store the inner shared_ptr and observed version in the read_set
+        read_set_.emplace(id, std::make_pair(it->second.obj, it->second.version));
         return it->second.obj;
     }
 }
@@ -156,7 +163,7 @@ inline bool Transaction::commit() {
         }
     }
 
-    // 2) Conflict detection: ensure read_set entries are still the same pointers in graph
+    // 2) Conflict detection: ensure read_set entries' versions match what's in graph
     for (const auto& kv : read_set_) {
         auto it = graph_.objects_.find(kv.first);
         if (it == graph_.objects_.end()) {
@@ -164,8 +171,9 @@ inline bool Transaction::commit() {
             failed_ = true;
             return false;
         }
-        // pointer equality used previously; compare the stored pointer in graph to the pointer we observed
-        if (it->second.obj != kv.second) {
+        // version equality check
+        const uint64_t observed_version = kv.second.second;
+        if (it->second.version != observed_version) {
             failed_ = true;
             return false;
         }
