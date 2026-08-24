@@ -21,9 +21,9 @@ inline std::shared_ptr<const MemoryObject> MemoryGraph::get_object(const UUID& i
     auto from_cold = cold_.load(id);
     if (from_cold) {
         // put into hot; ensure eviction persists to cold
-        hot_.put(from_cold, [&](MemoryObjectPtr ev) {
+        hot_.put(from_cold, [&](MemoryObjectPtr ev) -> bool {
             // Eviction callback - persist evicted object to cold storage
-            try { cold_.save(ev->id, *ev); } catch (...) {}
+            try { return cold_.save(ev->id, *ev); } catch (...) { return false; }
         });
         return from_cold;
     }
@@ -50,6 +50,7 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
                                                                          const std::optional<AgentID>& owner) const
 {
     std::vector<std::shared_ptr<const Fact>> out;
+    std::unordered_set<UUID> seen_ids;
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& kv : objects_) {
         auto fact = std::dynamic_pointer_cast<const Fact>(kv.second.obj);
@@ -57,7 +58,7 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
         if (entity && fact->entity != *entity) continue;
         if (predicate && fact->predicate != *predicate) continue;
         if (owner && fact->owner != *owner) continue;
-        out.push_back(fact);
+        if (seen_ids.insert(fact->id).second) out.push_back(fact);
     }
     lock.unlock();
 
@@ -67,7 +68,7 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
             if (entity && fact->entity != *entity) continue;
             if (predicate && fact->predicate != *predicate) continue;
             if (owner && fact->owner != *owner) continue;
-            out.push_back(fact);
+            if (seen_ids.insert(fact->id).second) out.push_back(fact);
         }
     }
     return out;
@@ -94,7 +95,7 @@ inline bool MemoryGraph::validate_global_invariants() const {
 // Transaction implementations
 
 inline Transaction::Transaction(MemoryGraph& graph)
-    : graph_(graph)
+    : graph_(graph), snapshot_version_(graph.global_version_counter_.load(std::memory_order_acquire))
 {}
 
 inline Transaction::~Transaction() {
@@ -217,7 +218,7 @@ inline bool Transaction::commit() {
         if (it == graph_.objects_.end()) {
             failed_ = true; return false;
         }
-        if (it->second.obj != kv.second) { failed_ = true; return false; }
+        if (it->second.version > snapshot_version_) { failed_ = true; return false; }
     }
 
     // 3) Global references validation
@@ -233,8 +234,8 @@ inline bool Transaction::commit() {
         graph_.objects_.emplace(id, so);
         graph_.reindex_object(obj);
         // insert into hot cache; eviction will write to cold via callback
-        graph_.hot_.put(obj, [&](MemoryObjectPtr ev) {
-            try { graph_.cold_.save(ev->id, *ev); } catch (...) {}
+        graph_.hot_.put(obj, [&](MemoryObjectPtr ev) -> bool {
+            try { return graph_.cold_.save(ev->id, *ev); } catch (...) { return false; }
         });
     }
 
