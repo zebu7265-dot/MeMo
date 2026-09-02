@@ -47,21 +47,22 @@ struct Fact : public MemoryObject {
         j["type"] = static_cast<int>(type());
         j["entity"] = entity;
         j["predicate"] = predicate;
-        // value: recursively convert
+        // value: recursively convert (types.hpp defines Value as basic scalar/vector<string>/map<string,string>)
         std::function<json(const Value&)> val_to_json = [&](const Value& v) -> json {
             if (std::holds_alternative<std::monostate>(v)) return nullptr;
             if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
             if (std::holds_alternative<int64_t>(v)) return std::get<int64_t>(v);
             if (std::holds_alternative<double>(v)) return std::get<double>(v);
             if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
-            if (std::holds_alternative<std::vector<Value>>(v)) {
+            // types.hpp uses vector<string> and unordered_map<string,string>
+            if (std::holds_alternative<std::vector<std::string>>(v)) {
                 json a = json::array();
-                for (const auto& e : std::get<std::vector<Value>>(v)) a.push_back(val_to_json(e));
+                for (const auto& e : std::get<std::vector<std::string>>(v)) a.push_back(e);
                 return a;
             }
-            if (std::holds_alternative<std::unordered_map<std::string, Value>>(v)) {
+            if (std::holds_alternative<std::unordered_map<std::string, std::string>>(v)) {
                 json o = json::object();
-                for (const auto& kv : std::get<std::unordered_map<std::string, Value>>(v)) o[kv.first] = val_to_json(kv.second);
+                for (const auto& kv : std::get<std::unordered_map<std::string, std::string>>(v)) o[kv.first] = kv.second;
                 return o;
             }
             return nullptr;
@@ -109,14 +110,14 @@ struct Event : public MemoryObject {
             if (std::holds_alternative<int64_t>(v)) return std::get<int64_t>(v);
             if (std::holds_alternative<double>(v)) return std::get<double>(v);
             if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
-            if (std::holds_alternative<std::vector<Value>>(v)) {
+            if (std::holds_alternative<std::vector<std::string>>(v)) {
                 json a = json::array();
-                for (const auto& e : std::get<std::vector<Value>>(v)) a.push_back(val_to_json(e));
+                for (const auto& e : std::get<std::vector<std::string>>(v)) a.push_back(e);
                 return a;
             }
-            if (std::holds_alternative<std::unordered_map<std::string, Value>>(v)) {
+            if (std::holds_alternative<std::unordered_map<std::string, std::string>>(v)) {
                 json o = json::object();
-                for (const auto& kv : std::get<std::unordered_map<std::string, Value>>(v)) o[kv.first] = val_to_json(kv.second);
+                for (const auto& kv : std::get<std::unordered_map<std::string, std::string>>(v)) o[kv.first] = kv.second;
                 return o;
             }
             return nullptr;
