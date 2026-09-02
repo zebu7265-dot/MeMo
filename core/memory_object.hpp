@@ -39,10 +39,16 @@ protected:
     MemoryObject(const UUID& id_, const AgentID& owner_)
         : id(id_), owner(owner_), recorded_at(std::chrono::system_clock::now()) {}
 
-    // immutable: disable copy/move
-    MemoryObject(const MemoryObject&) = delete;
+    // Copy/move construction is safe because the identity fields are const;
+    // assignment remains disabled so object identity cannot change.
+    MemoryObject(const MemoryObject& other)
+        : id(other.id), owner(other.owner), recorded_at(other.recorded_at),
+          last_accessed(other.last_accessed), serialized_size(other.serialized_size) {}
+    MemoryObject(MemoryObject&& other) noexcept
+        : id(std::move(other.id)), owner(std::move(other.owner)),
+          recorded_at(other.recorded_at), last_accessed(other.last_accessed),
+          serialized_size(other.serialized_size) {}
     MemoryObject& operator=(const MemoryObject&) = delete;
-    MemoryObject(MemoryObject&&) = delete;
     MemoryObject& operator=(MemoryObject&&) = delete;
 };
 

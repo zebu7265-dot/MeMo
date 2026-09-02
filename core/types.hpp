@@ -15,15 +15,16 @@ using AgentID = std::string;
 using Timestamp = std::chrono::system_clock::time_point;
 using Duration = std::chrono::system_clock::duration;
 
- // Recursive Value: C++17 allows containers of incomplete types here (vector<Value>, map<string,Value>)
+// C++17 cannot express a directly recursive std::variant alias. Keep the
+// wire-level value types finite until a recursive wrapper is introduced.
 using Value = std::variant<
     std::monostate,
     bool,
     int64_t,
     double,
     std::string,
-    std::vector<Value>,
-    std::unordered_map<std::string, Value>
+    std::vector<std::string>,
+    std::unordered_map<std::string, std::string>
 >;
 
 struct TimeRange {

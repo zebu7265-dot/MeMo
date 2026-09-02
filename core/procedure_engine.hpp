@@ -128,14 +128,21 @@ private:
     }
 
     InternalResult run_native(const NativeBody& body, const std::vector<UUID>& inputs, Transaction& tx) {
-        std::shared_lock<std::shared_mutex> lock(reg_mutex_);
-        auto it = registry_.find(body.function_name);
-        if (it == registry_.end()) {
+        NativeFunction fn;
+        {
+            std::shared_lock<std::shared_mutex> lock(reg_mutex_);
+            auto it = registry_.find(body.function_name);
+            if (it == registry_.end()) {
+                return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration{}};
+            }
+            fn = it->second;
+        }
+        if (!fn) {
             return {ExecutionStatus::Failure, "Native function not found: " + body.function_name, {}, Duration{}};
         }
         try {
             auto start = std::chrono::system_clock::now();
-            auto outputs = it->second(inputs, graph_, tx);
+            auto outputs = fn(inputs, graph_, tx);
             auto end = std::chrono::system_clock::now();
             return {ExecutionStatus::Success, "", outputs, end - start};
         } catch (const std::exception& e) {

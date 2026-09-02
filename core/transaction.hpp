@@ -45,6 +45,7 @@ public:
 
     bool committed() const noexcept { return committed_; }
     bool failed() const noexcept { return failed_; }
+    uint64_t snapshot_version() const noexcept { return snapshot_version_; }
 
 private:
     MemoryGraph& graph_;
@@ -52,6 +53,7 @@ private:
     std::unordered_map<UUID, std::shared_ptr<const MemoryObject>> write_set_;
     bool committed_{false};
     bool failed_{false};
+    uint64_t snapshot_version_{0};
 
     bool validate_references_nolock() const;
 };

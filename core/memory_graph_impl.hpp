@@ -1,19 +1,38 @@
 #pragma once
 #include "memory_graph.hpp"
 #include "transaction.hpp"
+#include "third_party/nlohmann-json/include_nlohmann_json.hpp"
 #include <shared_mutex>
 #include <chrono>
 #include <type_traits>
+#include <unordered_set>
 
 namespace om {
+
+using nlohmann::json;
 
 // MemoryGraph implementations
 
 inline std::shared_ptr<const MemoryObject> MemoryGraph::get_object(const UUID& id) const {
+    // Try hot cache first
+    if (auto h = hot_.get(id)) return h;
+
+    // Not in hot, try cold storage (may be slow). If found, load into hot and return.
+    auto from_cold = cold_.load(id);
+    if (from_cold) {
+        // put into hot; ensure eviction persists to cold
+        hot_.put(from_cold, [&](MemoryObjectPtr ev) -> bool {
+            // Eviction callback - persist evicted object to cold storage
+            try { return cold_.save(ev->id, *ev); } catch (...) { return false; }
+        });
+        return from_cold;
+    }
+
+    // fallback: check in-memory graph under shared lock
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = objects_.find(id);
     if (it == objects_.end()) return nullptr;
-    return it->second;
+    return it->second.obj;
 }
 
 inline std::shared_ptr<const Fact> MemoryGraph::get_fact(const UUID& id) const {
@@ -31,14 +50,26 @@ inline std::vector<std::shared_ptr<const Fact>> MemoryGraph::find_facts(const st
                                                                          const std::optional<AgentID>& owner) const
 {
     std::vector<std::shared_ptr<const Fact>> out;
+    std::unordered_set<UUID> seen_ids;
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& kv : objects_) {
-        auto fact = std::dynamic_pointer_cast<const Fact>(kv.second);
+        auto fact = std::dynamic_pointer_cast<const Fact>(kv.second.obj);
         if (!fact) continue;
         if (entity && fact->entity != *entity) continue;
         if (predicate && fact->predicate != *predicate) continue;
         if (owner && fact->owner != *owner) continue;
-        out.push_back(fact);
+        if (seen_ids.insert(fact->id).second) out.push_back(fact);
+    }
+    lock.unlock();
+
+    // A restarted graph has no in-memory entries yet; include persisted Cold objects.
+    for (const auto& id : cold_.list_all_ids()) {
+        if (auto fact = std::dynamic_pointer_cast<const Fact>(cold_.load(id))) {
+            if (entity && fact->entity != *entity) continue;
+            if (predicate && fact->predicate != *predicate) continue;
+            if (owner && fact->owner != *owner) continue;
+            if (seen_ids.insert(fact->id).second) out.push_back(fact);
+        }
     }
     return out;
 }
@@ -55,9 +86,8 @@ inline void MemoryGraph::reindex_object(const std::shared_ptr<const MemoryObject
 inline bool MemoryGraph::validate_global_invariants() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& kv : objects_) {
-        const auto& obj = kv.second;
+        const auto& obj = kv.second.obj;
         if (!obj->is_valid()) return false;
-        // Additional referential checks could be added here similar to Transaction::validate_references_nolock
     }
     return true;
 }
@@ -65,7 +95,7 @@ inline bool MemoryGraph::validate_global_invariants() const {
 // Transaction implementations
 
 inline Transaction::Transaction(MemoryGraph& graph)
-    : graph_(graph)
+    : graph_(graph), snapshot_version_(graph.global_version_counter_.load(std::memory_order_acquire))
 {}
 
 inline Transaction::~Transaction() {
@@ -88,15 +118,21 @@ inline std::shared_ptr<const MemoryObject> Transaction::read(const UUID& id) {
         std::shared_lock<std::shared_mutex> lock(graph_.mutex_);
         auto it = graph_.objects_.find(id);
         if (it == graph_.objects_.end()) {
+            // also try hot/cold layers
+            lock.unlock();
+            auto obj = graph_.get_object(id);
+            if (obj) {
+                read_set_.emplace(id, obj);
+                return obj;
+            }
             return nullptr;
         }
-        read_set_.emplace(id, it->second);
-        return it->second;
+        read_set_.emplace(id, it->second.obj);
+        return it->second.obj;
     }
 }
 
 inline bool Transaction::validate_references_nolock() const {
-    // For each staged object, ensure all referenced UUIDs exist either in graph or in write_set_
     auto has_id = [&](const UUID& id) -> bool {
         if (write_set_.find(id) != write_set_.end()) return true;
         if (graph_.objects_.find(id) != graph_.objects_.end()) return true;
@@ -106,7 +142,6 @@ inline bool Transaction::validate_references_nolock() const {
     for (const auto& kv : write_set_) {
         const auto& obj = kv.second;
         if (!obj) return false;
-        // Inspect based on dynamic type
         if (auto fact = std::dynamic_pointer_cast<const Fact>(obj)) {
             if (fact->superseded_by.has_value() && !has_id(*fact->superseded_by)) return false;
         }
@@ -129,7 +164,6 @@ inline bool Transaction::validate_references_nolock() const {
                     if (!has_id(step)) return false;
                 }
             }
-            // OpaqueRecipe and NativeBody have no external refs by contract
         }
         if (auto exec = std::dynamic_pointer_cast<const Execution>(obj)) {
             if (!has_id(exec->procedure_id)) return false;
@@ -141,42 +175,68 @@ inline bool Transaction::validate_references_nolock() const {
 }
 
 inline bool Transaction::commit() {
-    // Acquire unique lock on graph
+    // Phase 1: serialize and write temps (no graph lock)
+    std::vector<UUID> serialized_ids;
+    serialized_ids.reserve(write_set_.size());
+
+    for (const auto& kv : write_set_) {
+        const UUID& id = kv.first;
+        const auto& obj = kv.second;
+        if (!obj) { failed_ = true; return false; }
+        json j;
+        j["version"] = 1;
+        j["type"] = static_cast<int>(obj->type());
+        j["recorded_at"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj->recorded_at.time_since_epoch()).count();
+        j["last_accessed"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj->last_accessed.time_since_epoch()).count();
+        try {
+            j["payload"] = json::parse(obj->serialize());
+        } catch (...) {
+            j["payload"] = obj->serialize();
+        }
+        if (!graph_.cold_.write_temp(id, j.dump(2))) {
+            failed_ = true;
+            // attempt best-effort cleanup could be added here
+            return false;
+        }
+        serialized_ids.push_back(id);
+    }
+
+    // Phase 2: acquire graph lock and perform validations + promote files + insert into graph
     std::unique_lock<std::shared_mutex> lock(graph_.mutex_);
 
-    // 1) Overwrite check: no staged IDs already exist in graph
-    for (const auto& kv : write_set_) {
-        if (graph_.objects_.find(kv.first) != graph_.objects_.end()) {
+    // 1) Overwrite check
+    for (const auto& id : serialized_ids) {
+        if (graph_.objects_.find(id) != graph_.objects_.end()) {
             failed_ = true;
             return false;
         }
     }
 
-    // 2) Conflict detection: ensure read_set entries are still the same pointers in graph
+    // 2) Conflict detection on read_set
     for (const auto& kv : read_set_) {
         auto it = graph_.objects_.find(kv.first);
         if (it == graph_.objects_.end()) {
-            // read something that disappeared
-            failed_ = true;
-            return false;
+            failed_ = true; return false;
         }
-        // pointer equality indicates unchanged
-        if (it->second != kv.second) {
-            failed_ = true;
-            return false;
-        }
+        if (it->second.version > snapshot_version_) { failed_ = true; return false; }
     }
 
-    // 3) Global invariant: references must exist in graph or in write_set
-    if (!validate_references_nolock()) {
-        failed_ = true;
-        return false;
-    }
+    // 3) Global references validation
+    if (!validate_references_nolock()) { failed_ = true; return false; }
 
-    // 4) Apply atomically
+    // 4) Promote temp files and insert into graph with versions
     for (const auto& kv : write_set_) {
-        graph_.objects_.emplace(kv.first, kv.second);
-        graph_.reindex_object(kv.second);
+        const UUID& id = kv.first;
+        const auto& obj = kv.second;
+        if (!graph_.cold_.promote_temp(id)) { failed_ = true; return false; }
+        uint64_t v = graph_.global_version_counter_.fetch_add(1);
+        StoredObject so{obj, v};
+        graph_.objects_.emplace(id, so);
+        graph_.reindex_object(obj);
+        // insert into hot cache; eviction will write to cold via callback
+        graph_.hot_.put(obj, [&](MemoryObjectPtr ev) -> bool {
+            try { return graph_.cold_.save(ev->id, *ev); } catch (...) { return false; }
+        });
     }
 
     committed_ = true;

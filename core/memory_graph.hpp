@@ -3,6 +3,8 @@
 #include "declarative.hpp"
 #include "procedural.hpp"
 #include "types.hpp"
+#include "hot_cache.hpp"
+#include "cold_storage.hpp"
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -21,7 +23,8 @@ class Transaction; // forward
 
 class MemoryGraph {
 public:
-    MemoryGraph() = default;
+    explicit MemoryGraph(const std::string& cold_base = "./data/cold", size_t hot_max = 1024)
+        : cold_(cold_base), hot_(hot_max) {}
     ~MemoryGraph() = default;
 
     std::shared_ptr<const MemoryObject> get_object(const UUID& id) const;
@@ -51,6 +54,10 @@ private:
     bool has_object_nolock(const UUID& id) const {
         return objects_.find(id) != objects_.end();
     }
+
+    // Storage layers
+    mutable HotCache hot_;
+    mutable ColdStorage cold_;
 };
 
 } // namespace om
