@@ -1,5 +1,6 @@
 #pragma once
 #include "memory_object.hpp"
+#include "memory_graph.hpp"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -29,8 +30,8 @@ public:
     // Throws std::runtime_error on failure.
     void save_with_version(const UUID& id, const MemoryObject& obj, uint64_t version);
 
-    // Load object from disk. Returns nullptr if not found or on error.
-    MemoryObjectPtr load(const UUID& id);
+    // Load object from disk. Returns StoredObject (obj + persisted version) when present, std::nullopt otherwise.
+    std::optional<StoredObject> load(const UUID& id);
 
     // Remove object from cold storage (used when moving to Freeze). Returns true on success.
     bool remove(const UUID& id);
