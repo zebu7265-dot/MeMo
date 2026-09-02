@@ -11,6 +11,7 @@
 namespace om {
 
 namespace fs = std::filesystem;
+using nlohmann::json;
 
 static std::string safe_filename_for(const UUID& id) {
     if (id.empty() || id == "." || id == ".." ||
@@ -36,33 +37,27 @@ std::string ColdStorage::make_tmp_filename(const UUID& id) const {
 }
 
 bool ColdStorage::write_temp(const UUID& id, const std::string& wrapper_json) {
-    try {
-        std::ofstream ofs(make_tmp_filename(id), std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs << wrapper_json;
-        ofs.flush();
-        return static_cast<bool>(ofs);
-    } catch (...) {
-        return false;
-    }
+    std::ofstream ofs(make_tmp_filename(id), std::ios::binary | std::ios::trunc);
+    if (!ofs) throw std::runtime_error("ColdStorage: cannot open tmp file for write_temp: " + make_tmp_filename(id));
+    ofs << wrapper_json;
+    ofs.flush();
+    if (!ofs) throw std::runtime_error("ColdStorage: failed to write tmp file for " + id);
+    return true;
 }
 
 bool ColdStorage::promote_temp(const UUID& id) {
-    try {
-        std::error_code ec;
-        fs::rename(make_tmp_filename(id), make_filename(id), ec);
-        if (ec) return false;
+    std::error_code ec;
+    fs::rename(make_tmp_filename(id), make_filename(id), ec);
+    if (ec) throw std::runtime_error(std::string("ColdStorage: rename failed in promote_temp for ") + id + ": " + ec.message());
+    {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         file_map_[id] = fs::path(make_filename(id)).filename().string();
         persist_index_nolock();
-        return true;
-    } catch (...) {
-        return false;
     }
+    return true;
 }
 
 void ColdStorage::persist_index_nolock() {
-    // Simple index persistence: write a newline-delimited list of id->filename pairs as JSON-like text
     auto tmp = fs::path(base_path_) / "index.json.tmp";
     auto finalp = fs::path(base_path_) / "index.json";
     std::ofstream ofs(tmp.string(), std::ios::binary | std::ios::trunc);
@@ -70,14 +65,11 @@ void ColdStorage::persist_index_nolock() {
         std::cerr << "ColdStorage: cannot write index tmp\n";
         return;
     }
-    ofs << "{";
-    bool first = true;
+    json j;
     for (const auto& kv : file_map_) {
-        if (!first) ofs << ",\n";
-        ofs << "\"" << kv.first << "\": \"" << kv.second << "\"";
-        first = false;
+        j[kv.first] = kv.second;
     }
-    ofs << "}\n";
+    ofs << j.dump(2) << "\n";
     ofs.flush(); ofs.close();
     std::error_code ec;
     fs::rename(tmp, finalp, ec);
@@ -85,32 +77,26 @@ void ColdStorage::persist_index_nolock() {
 }
 
 bool ColdStorage::save(const UUID& id, const MemoryObject& obj) {
-    // Build a minimal JSON wrapper; assume obj.serialize() returns JSON text
-    std::string payload = obj.serialize();
-    // header fields
-    auto recorded_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(obj.recorded_at.time_since_epoch()).count();
-    auto last_accessed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(obj.last_accessed.time_since_epoch()).count();
-
+    // Keep existing save for compatibility, but prefer save_with_version for correct MVCC writes.
+    json wrapper;
+    wrapper["version"] = 1;
+    wrapper["type"] = static_cast<int>(obj.type());
+    wrapper["recorded_at"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj.recorded_at.time_since_epoch()).count();
+    wrapper["last_accessed"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj.last_accessed.time_since_epoch()).count();
+    try {
+        wrapper["payload"] = json::parse(obj.serialize());
+    } catch (...) {
+        wrapper["payload"] = obj.serialize();
+    }
     std::string tmp_path = make_tmp_filename(id);
     std::string final_path = make_filename(id);
-
-    {
-        std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!ofs) {
-            std::cerr << "ColdStorage: cannot open tmp file for " << id << "\n";
-            return false;
-        }
-        ofs << "{\n";
-        ofs << "  \"version\": 1,\n";
-        ofs << "  \"type\": " << static_cast<int>(obj.type()) << ",\n";
-        ofs << "  \"recorded_at\": " << recorded_at_ms << ",\n";
-        ofs << "  \"last_accessed\": " << last_accessed_ms << ",\n";
-        ofs << "  \"payload\": ";
-        ofs << payload << "\n";
-        ofs << "}\n";
-        ofs.flush(); ofs.close();
+    std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "ColdStorage: cannot open tmp file for " << id << "\n";
+        return false;
     }
-
+    ofs << wrapper.dump(2) << "\n";
+    ofs.flush(); ofs.close();
     std::error_code ec;
     fs::rename(tmp_path, final_path, ec);
     if (ec) {
@@ -118,7 +104,6 @@ bool ColdStorage::save(const UUID& id, const MemoryObject& obj) {
         std::error_code ec2; fs::remove(tmp_path, ec2);
         return false;
     }
-
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         file_map_[id] = fs::path(final_path).filename().string();
@@ -127,36 +112,82 @@ bool ColdStorage::save(const UUID& id, const MemoryObject& obj) {
     return true;
 }
 
-MemoryObjectPtr ColdStorage::load(const UUID& id) {
-    std::string path;
-    try {
-        path = make_filename(id);
-    } catch (...) {
-        return nullptr;
+void ColdStorage::write_final(const UUID& id, const std::string& wrapper_json) {
+    std::string tmp_final = make_tmp_filename(id) + ".finaltmp";
+    std::ofstream ofs(tmp_final, std::ios::binary | std::ios::trunc);
+    if (!ofs) throw std::runtime_error("ColdStorage: cannot open final tmp for " + id);
+    ofs << wrapper_json;
+    ofs.flush(); ofs.close();
+    std::error_code ec;
+    fs::rename(tmp_final, make_filename(id), ec);
+    if (ec) {
+        std::error_code ec2;
+        fs::remove(tmp_final, ec2);
+        throw std::runtime_error(std::string("ColdStorage: rename final failed for ") + id + ": " + ec.message());
     }
-    if (!fs::exists(path)) return nullptr;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        file_map_[id] = fs::path(make_filename(id)).filename().string();
+        persist_index_nolock();
+    }
+}
+
+void ColdStorage::save_with_version(const UUID& id, const MemoryObject& obj, uint64_t version) {
+    json wrapper;
+    wrapper["version"] = version;
+    wrapper["type"] = static_cast<int>(obj.type());
+    wrapper["recorded_at"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj.recorded_at.time_since_epoch()).count();
+    wrapper["last_accessed"] = std::chrono::duration_cast<std::chrono::milliseconds>(obj.last_accessed.time_since_epoch()).count();
+    try {
+        wrapper["payload"] = json::parse(obj.serialize());
+    } catch (...) {
+        wrapper["payload"] = obj.serialize();
+    }
+
+    std::string tmp_final = make_tmp_filename(id) + ".finaltmp";
+    std::ofstream ofs(tmp_final, std::ios::binary | std::ios::trunc);
+    if (!ofs) throw std::runtime_error("ColdStorage: cannot open final tmp for save_with_version: " + tmp_final);
+    ofs << wrapper.dump(2) << "\n";
+    ofs.flush(); ofs.close();
+
+    std::error_code ec;
+    fs::rename(tmp_final, make_filename(id), ec);
+    if (ec) {
+        std::error_code ec2; fs::remove(tmp_final, ec2);
+        throw std::runtime_error(std::string("ColdStorage: rename final failed for save_with_version ") + id + ": " + ec.message());
+    }
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        file_map_[id] = fs::path(make_filename(id)).filename().string();
+        persist_index_nolock();
+    }
+}
+
+std::optional<StoredObject> ColdStorage::load(const UUID& id) {
+    std::string path = make_filename(id);
+    if (!fs::exists(path)) return std::nullopt;
     std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return nullptr;
+    if (!ifs) return std::nullopt;
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    try {
-        auto wrapper = nlohmann::json::parse(content);
-        if (!wrapper.contains("payload")) return nullptr;
-        auto obj = MemoryObject::deserialize(wrapper["payload"].dump());
-        if (obj) {
-            obj->last_accessed = std::chrono::system_clock::now();
-            if (wrapper.contains("last_accessed") && wrapper["last_accessed"].is_number_integer()) {
-                obj->last_accessed = std::chrono::system_clock::time_point(
-                    std::chrono::milliseconds(wrapper["last_accessed"].get<int64_t>()));
-            }
+    json wrapper = json::parse(content);
+    // Fallback to 1 for legacy files; explicit version persisted by newer code will be used
+    uint64_t file_version = wrapper.value("version", 1u);
+    if (!wrapper.contains("payload")) return std::nullopt;
+    auto payload = wrapper["payload"].dump();
+    auto obj = MemoryObject::deserialize(payload);
+    if (obj) {
+        obj->last_accessed = std::chrono::system_clock::now();
+        if (wrapper.contains("last_accessed") && wrapper["last_accessed"].is_number_integer()) {
+            obj->last_accessed = std::chrono::system_clock::time_point(
+                std::chrono::milliseconds(wrapper["last_accessed"].get<int64_t>()));
         }
-        {
-            std::unique_lock<std::shared_mutex> lock(mutex_);
-            file_map_[id] = fs::path(path).filename().string();
-        }
-        return obj;
-    } catch (...) {
-        return nullptr;
     }
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        file_map_[id] = fs::path(path).filename().string();
+    }
+    if (obj) return std::optional<StoredObject>{StoredObject{obj, file_version}};
+    return std::nullopt;
 }
 
 bool ColdStorage::remove(const UUID& id) {
