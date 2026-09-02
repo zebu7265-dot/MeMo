@@ -21,6 +21,14 @@ public:
     // Promote temp file to final (phase 2 of commit). Returns true on success.
     bool promote_temp(const UUID& id);
 
+    // Write a final file (wrapper JSON that includes assigned version) atomically.
+    // Throws std::runtime_error on failure.
+    void write_final(const UUID& id, const std::string& wrapper_json);
+
+    // Persist an object to disk with an explicit MVCC version.
+    // Throws std::runtime_error on failure.
+    void save_with_version(const UUID& id, const MemoryObject& obj, uint64_t version);
+
     // Load object from disk. Returns nullptr if not found or on error.
     MemoryObjectPtr load(const UUID& id);
 
