@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ om-storage-hcfs ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake libgtest-dev
+        # build and install gtest if necessary
+        if [ -d /usr/src/gtest ]; then
+          sudo cmake -S /usr/src/gtest -B /usr/src/gtest/build
+          sudo cmake --build /usr/src/gtest/build
+          sudo cp /usr/src/gtest/build/libgtest*.a /usr/lib || true
+        fi
+
+    - name: Configure
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build -- -j$(nproc)
+
+    - name: Run tests
+      run: ctest --test-dir build --output-on-failure
