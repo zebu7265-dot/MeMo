@@ -3,6 +3,9 @@ project(MeMo LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Threads REQUIRED)
+find_package(GTest REQUIRED)
+
 add_executable(memo
     main.cpp
     core/cold_storage.cpp
@@ -23,5 +26,5 @@ add_executable(memo_storage_test
     core/hot_cache.cpp
 )
 target_include_directories(memo_storage_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(memo_storage_test PRIVATE Threads::Threads)
+target_link_libraries(memo_storage_test PRIVATE Threads::Threads GTest::GTest GTest::Main)
 add_test(NAME memo_storage_test COMMAND memo_storage_test)
